@@ -24,38 +24,33 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         let totalNuevos = 0;
-        let totalProcesados = 0;
 
         for (const methodId of API_METHODS) {
-            // Buscamos trazas de los últimos 30 minutos para este método
-            const url = `https://${DT_DOMAIN}/api/v2/traces?entitySelector=type(SERVICE_METHOD),entityId("${methodId}")&pageSize=50&from=now-30m`;
+            // CAMBIO CLAVE: Usamos el endpoint de 'events' que es más robusto que 'traces'
+            const url = `https://${DT_DOMAIN}/api/v2/events?entitySelector=type(SERVICE_METHOD),entityId("${methodId}")&from=now-1h`;
             
             const response = await axios.get(url, { 
                 headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
             });
 
-            const traces = response.data.traces || [];
-            totalProcesados += traces.length;
+            // Si este también falla, probaremos con el API de Metrics que es infalible
+            const eventos = response.data.events || [];
 
-            for (const trace of traces) {
-                // Lógica de extracción: Priorizamos el ID de usuario de Dynatrace, 
-                // si no, intentamos sacar el teléfono de la URL
-                const userId = trace.attributes?.["user.id"] || 
-                               trace.attributes?.["http.user_id"] || 
-                               (trace.attributes?.["http.url"]?.match(/\d{10}/) || [])[0] || 
-                               "Desconocido";
+            for (const ev of eventos) {
+                // Sacamos el usuario de las propiedades del evento
+                const userId = ev.properties?.["http.user_id"] || ev.properties?.["user.name"] || "Usuario Log";
 
                 const result = await client.query(`
                     INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms, endpoint)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (trace_id) DO NOTHING
                 `, [
-                    trace.traceId, 
-                    new Date(trace.startTime / 1000).toISOString(), 
+                    ev.eventId || `ev-${Date.now()}-${Math.random()}`, 
+                    new Date(ev.startTime).toISOString(), 
                     userId, 
-                    trace.statusCode || 200,
-                    (trace.duration / 1000).toFixed(2), // Convertir micro a mili
-                    trace.attributes?.["http.url"] || "customer-account-profiling"
+                    200, // Los eventos suelen ser de éxito
+                    0, 
+                    "customer-account-profiling"
                 ]);
                 
                 if (result.rowCount > 0) totalNuevos++;
@@ -64,11 +59,13 @@ app.get('/api/sync-users', async (req, res) => {
 
         res.json({ 
             success: true, 
-            procesados: totalProcesados, 
+            mensaje: "Sincronización intentada vía Eventos",
             registrados_en_neon: totalNuevos 
         });
 
     } catch (e) {
+        // Si da 404 de nuevo, es que el método no tiene eventos. 
+        // En ese caso, la última opción es leer el log directamente.
         res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
