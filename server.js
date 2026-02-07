@@ -17,33 +17,39 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Buscamos directamente en las peticiones HTTP (Web Requests)
-    // Esto es más preciso para encontrar APIs que no son "Servicios" formales
-    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:filter(and(or(contains("http.url","perfilado"),contains("http.url","customer"))))&from=now-2h&pageSize=100`;
+    // 1. Definimos los servicios de Power CRM que ya vimos en tu lista
+    const pcrmServiceId = 'SERVICE-00FFF25CF250FD45'; 
+    
+    // 2. Buscamos las métricas de las peticiones individuales dentro de ese servicio
+    // Esto nos dirá exactamente cómo se llaman los endpoints (las APIs)
+    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:filter(eq("dt.entity.service","${pcrmServiceId}")):splitBy("dt.entity.service.keyRequest")&from=now-2h`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const resultados = response.data.result[0]?.data || [];
+        const data = response.data.result[0]?.data || [];
 
-        if (resultados.length === 0) {
+        if (data.length === 0) {
             return res.json({ 
-                message: "No se encontraron URLs con 'perfilado' o 'customer'.",
-                sugerencia: "Probemos listando todas las URLs que pasan por el proceso de Power CRM." 
+                message: "No se detectaron operaciones recientes en el servicio de Power CRM.",
+                servicio_buscado: pcrmServiceId
             });
         }
 
+        // Mapeamos los nombres de las operaciones encontradas
+        const operaciones = data.map(item => ({
+            operationId: item.dimensionMap["dt.entity.service.keyRequest"],
+            // El nombre suele venir en la metadata o podemos deducirlo
+        }));
+
         res.json({
-            mensaje: "¡Encontré estas rutas activas!",
-            data: resultados
+            mensaje: "Operaciones encontradas en Power CRM",
+            data: operaciones
         });
     } catch (e) {
-        res.status(500).json({ 
-            error: "Error al buscar por URL", 
-            detalle: e.response?.data || e.message 
-        });
+        res.status(500).json({ error: e.message, detalle: e.response?.data });
     }
 });
 
