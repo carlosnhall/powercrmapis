@@ -17,36 +17,28 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // 1. Definimos los servicios de Power CRM que ya vimos en tu lista
-    const pcrmServiceId = 'SERVICE-00FFF25CF250FD45'; 
-    
-    // 2. Buscamos las métricas de las peticiones individuales dentro de ese servicio
-    // Esto nos dirá exactamente cómo se llaman los endpoints (las APIs)
-    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:filter(eq("dt.entity.service","${pcrmServiceId}")):splitBy("dt.entity.service.keyRequest")&from=now-2h`;
+    // Buscamos SERVICE_METHOD, que es donde Dynatrace guarda los endpoints individuales
+    const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("perfilado")');
+    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=50`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const data = response.data.result[0]?.data || [];
-
-        if (data.length === 0) {
+        if (!response.data.entities || response.data.entities.length === 0) {
             return res.json({ 
-                message: "No se detectaron operaciones recientes en el servicio de Power CRM.",
-                servicio_buscado: pcrmServiceId
+                message: "No se encontraron métodos con 'perfilado'. Intentando con 'customer'...",
+                ayuda: "Cambiá el filtro en el código a .contains('customer') si este falla."
             });
         }
-
-        // Mapeamos los nombres de las operaciones encontradas
-        const operaciones = data.map(item => ({
-            operationId: item.dimensionMap["dt.entity.service.keyRequest"],
-            // El nombre suele venir en la metadata o podemos deducirlo
-        }));
-
+        
         res.json({
-            mensaje: "Operaciones encontradas en Power CRM",
-            data: operaciones
+            total: response.data.totalCount,
+            apis_encontradas: response.data.entities.map(e => ({
+                id: e.entityId,
+                nombre_api: e.displayName
+            }))
         });
     } catch (e) {
         res.status(500).json({ error: e.message, detalle: e.response?.data });
