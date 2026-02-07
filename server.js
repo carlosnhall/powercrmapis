@@ -38,43 +38,35 @@ app.get('/api/discover-fields', async (req, res) => {
 });
 
 // --- ENDPOINT DE SINCRONIZACIÓN ---
-app.get('/api/sync-users', async (req, res) => {
-    let client;
+app.get('/api/discover-fields', async (req, res) => {
+    // Cambiamos a USQL (User Sessions Query Language)
+    // Buscamos las últimas acciones que contengan el nombre de tu API
+    const usqlQuery = encodeURIComponent("SELECT userId, userType, ip, userAgent, city FROM userSession WHERE userAction.name LIKE '*perfilado-customer-account-api*' LIMIT 1");
+    const url = `https://${DT_DOMAIN}/api/v2/userSessions/query?query=${usqlQuery}`;
+
     try {
-        client = await pgPool.connect();
-        const url = `https://${DT_DOMAIN}/api/v2/traces?filter=contains(http.url, "perfilado-customer-account-api")&pageSize=50`;
-        
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const traces = response.data.traces || [];
-        let nuevos = 0;
-
-        for (const trace of traces) {
-            // Buscamos el usuario en los atributos (ajustar nombre según discover-fields)
-            const userId = trace.attributes?.["http.user_id"] || "Desconocido";
-            
-            const result = await client.query(`
-                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (trace_id) DO NOTHING
-            `, [
-                trace.traceId, 
-                new Date(trace.startTime / 1000).toISOString(), 
-                userId, 
-                trace.statusCode || 200,
-                (trace.duration / 1000000).toFixed(2)
-            ]);
-            
-            if (result.rowCount > 0) nuevos++;
+        if (!response.data.values || response.data.results.length === 0) {
+            return res.json({ 
+                message: "No se encontraron sesiones de usuario para esta API.",
+                ayuda: "Asegurate de que el Token tenga el permiso 'UserSessionQueryRequest' (v1 o v2)" 
+            });
         }
 
-        res.json({ success: true, procesados: traces.length, nuevos_en_db: nuevos });
+        res.json({
+            columnas: response.data.columnNames,
+            datos: response.data.values[0]
+        });
     } catch (e) {
-        res.status(500).json({ error: e.message });
-    } finally {
-        if (client) client.release();
+        console.error(`[❌] Error: ${e.message}`);
+        res.status(e.response?.status || 500).json({ 
+            error: e.message, 
+            detalle: e.response?.data,
+            url_intentada: `https://${DT_DOMAIN}/api/v2/userSessions/query`
+        });
     }
 });
 
