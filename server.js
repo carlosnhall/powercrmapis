@@ -23,49 +23,44 @@ app.get('/api/sync-users', async (req, res) => {
     let client;
     try {
         client = await pgPool.connect();
-        let totalNuevos = 0;
+        
+        // Consulta USQL: Busca usuarios que usaron la API de perfilado
+        // Filtramos por el nombre de la app que vimos en Kibana: Power CRM2
+        const usql = `SELECT userId, startTime, duration, userAction.name, application FROM userSession WHERE userAction.name LIKE "*customer-account-profiling*" LIMIT 50`;
+        const url = `https://${DT_DOMAIN}/api/v2/userSessions/query?query=${encodeURIComponent(usql)}`;
+        
+        const response = await axios.get(url, { 
+            headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
+        });
 
-        for (const methodId of API_METHODS) {
-            // CAMBIO CLAVE: Usamos el endpoint de 'events' que es más robusto que 'traces'
-            const url = `https://${DT_DOMAIN}/api/v2/events?entitySelector=type(SERVICE_METHOD),entityId("${methodId}")&from=now-1h`;
+        const rows = response.data.values || [];
+        let nuevos = 0;
+
+        for (const row of rows) {
+            // row[0] es userId, row[1] es startTime
+            const result = await client.query(`
+                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms, endpoint)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (trace_id) DO NOTHING
+            `, [
+                `usql-${row[1]}-${row[0]}`, // Generamos un ID único basado en tiempo y usuario
+                new Date(row[1]).toISOString(), 
+                row[0] || "Anonimo", 
+                200, 
+                row[2] || 0,
+                row[3] || "customer-account-profiling"
+            ]);
             
-            const response = await axios.get(url, { 
-                headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
-            });
-
-            // Si este también falla, probaremos con el API de Metrics que es infalible
-            const eventos = response.data.events || [];
-
-            for (const ev of eventos) {
-                // Sacamos el usuario de las propiedades del evento
-                const userId = ev.properties?.["http.user_id"] || ev.properties?.["user.name"] || "Usuario Log";
-
-                const result = await client.query(`
-                    INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms, endpoint)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (trace_id) DO NOTHING
-                `, [
-                    ev.eventId || `ev-${Date.now()}-${Math.random()}`, 
-                    new Date(ev.startTime).toISOString(), 
-                    userId, 
-                    200, // Los eventos suelen ser de éxito
-                    0, 
-                    "customer-account-profiling"
-                ]);
-                
-                if (result.rowCount > 0) totalNuevos++;
-            }
+            if (result.rowCount > 0) nuevos++;
         }
 
         res.json({ 
             success: true, 
-            mensaje: "Sincronización intentada vía Eventos",
-            registrados_en_neon: totalNuevos 
+            procesados_usql: rows.length, 
+            registrados_en_neon: nuevos 
         });
 
     } catch (e) {
-        // Si da 404 de nuevo, es que el método no tiene eventos. 
-        // En ese caso, la última opción es leer el log directamente.
         res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
