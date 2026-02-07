@@ -17,33 +17,31 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Probamos con SERVICE y PROCESS_GROUP_INSTANCE en una sola consulta o rotando el filtro
-    // Usamos entityName que es el predicado correcto para v2
-    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("customer")');
-    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=50`;
+    // Buscamos directamente en las peticiones HTTP (Web Requests)
+    // Esto es más preciso para encontrar APIs que no son "Servicios" formales
+    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:filter(and(or(contains("http.url","perfilado"),contains("http.url","customer"))))&from=now-2h&pageSize=100`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        if (!response.data.entities || response.data.entities.length === 0) {
+        const resultados = response.data.result[0]?.data || [];
+
+        if (resultados.length === 0) {
             return res.json({ 
-                message: "No se encontró nada con 'customer'. Intentá cambiando el filtro a 'perfilado' o 'account' en el código.",
-                totalCount: response.data.totalCount
+                message: "No se encontraron URLs con 'perfilado' o 'customer'.",
+                sugerencia: "Probemos listando todas las URLs que pasan por el proceso de Power CRM." 
             });
         }
-        
+
         res.json({
-            count: response.data.totalCount,
-            resultados: response.data.entities.map(e => ({
-                id: e.entityId,
-                nombre: e.displayName
-            }))
+            mensaje: "¡Encontré estas rutas activas!",
+            data: resultados
         });
     } catch (e) {
-        res.status(e.response?.status || 500).json({ 
-            error: "Error de sintaxis o conexión",
+        res.status(500).json({ 
+            error: "Error al buscar por URL", 
             detalle: e.response?.data || e.message 
         });
     }
