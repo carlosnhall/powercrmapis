@@ -29,62 +29,53 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         
-        // 1. Usamos la métrica de recuento que no requiere permisos de trazas
-        // Consultamos el tráfico del último tiempo desglosado por el nombre del método (URL)
-        const metricSelector = 'builtin:service.requestCount.total:splitBy("dt.entity.service.keyRequest")';
-        const url = `${DT_BASE_URL}/metrics/query?metricSelector=${metricSelector}&from=now-1h&resolution=1m`;
+        // 1. Buscamos todas las entidades de tipo SERVICE_METHOD
+        // Filtramos por el nombre de la API que ya confirmamos que existe
+        // Agregamos 'from=now-2h' para forzar a Dynatrace a buscar actividad reciente
+        const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("customer-account-profiling")');
+        const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}&pageSize=100&from=now-2h`;
         
-        console.log("📡 Consultando historial de tráfico (Métricas)...");
+        console.log("📡 Escaneando inventario de actividad reciente...");
         
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const data = response.data.result[0]?.data || [];
+        const entidades = response.data.entities || [];
         let nuevos = 0;
 
-        for (const item of data) {
-            const requestPath = item.dimensionMap["dt.entity.service.keyRequest"] || "";
+        for (const entidad of entidades) {
+            const requestPath = entidad.displayName;
             
-            // Solo procesamos si es tu API de Power CRM
-            if (requestPath.toLowerCase().includes("customer-account-profiling")) {
-                
-                // Las métricas traen una serie de puntos (timestamps y valores)
-                for (const valuePair of item.values) {
-                    const count = valuePair[1];
-                    const timestamp = new Date(valuePair[0]).toISOString();
+            // Extraemos el teléfono si existe en el nombre de la entidad
+            const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
+            const usuarioId = phoneMatch ? phoneMatch[1] : "Usuario-Activo";
 
-                    if (count > 0) {
-                        // Intentamos extraer el teléfono si viene en la URL de la métrica
-                        const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
-                        const usuarioId = phoneMatch ? phoneMatch[1] : "Usuario-Activo";
-
-                        // Insertamos: usamos el timestamp + path como clave única para no duplicar
-                        const result = await client.query(`
-                            INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
-                            VALUES ($1, $2, $3, $4, $5)
-                            ON CONFLICT (trace_id) DO NOTHING
-                        `, [
-                            `METRIC-${valuePair[0]}-${requestPath.slice(-10)}`, // ID único basado en tiempo
-                            timestamp,
-                            usuarioId,
-                            200,
-                            requestPath
-                        ]);
-                        
-                        if (result.rowCount > 0) nuevos++;
-                    }
-                }
-            }
+            // Insertamos usando el entityId como clave única para no duplicar lo que ya existe
+            const result = await client.query(`
+                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (trace_id) DO NOTHING
+            `, [
+                entidad.entityId, // Usamos el ID de Dynatrace como clave única
+                new Date().toISOString(),
+                usuarioId,
+                200,
+                requestPath
+            ]);
+            
+            if (result.rowCount > 0) nuevos++;
         }
 
         res.json({ 
             success: true, 
-            puntos_de_trafico_capturados: nuevos,
-            mensaje: "Sincronización por métricas completada" 
+            total_encontrados: entidades.length,
+            nuevos_en_base: nuevos,
+            mensaje: "Sincronización por Inventario de Actividad"
         });
 
     } catch (e) {
+        console.error("Error:", e.message);
         res.status(500).json({ error: e.message });
     } finally {
         if (client) client.release();
