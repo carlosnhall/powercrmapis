@@ -17,36 +17,19 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Eliminamos el filtro de nombre para ver TODO lo que hay disponible
-    const entitySelector = encodeURIComponent('type(SERVICE)');
-    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=100`;
+    // En lugar de buscar ENTITIES, buscamos directamente en las métricas de REQUESTS
+    // para ver qué URLs están pasando por el sistema ahora mismo.
+    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:splitBy("dt.entity.service")&pageSize=20&from=now-1h`;
     
     try {
-        console.log("Consultando todos los servicios en:", url);
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        if (!response.data.entities || response.data.entities.length === 0) {
-            return res.json({ 
-                message: "Dynatrace no reporta ningún servicio con este Token.",
-                permisos: "Verificá que el Token tenga 'entities.read' v2" 
-            });
-        }
-        
-        // Muestra la lista completa para que busquemos la API de perfilado manualmente
-        res.json({
-            total_en_dynatrace: response.data.totalCount,
-            lista_servicios: response.data.entities.map(e => ({
-                id: e.entityId,
-                nombre: e.displayName
-            }))
-        });
+        // Esto nos va a dar los IDs de los servicios que REALMENTE tienen tráfico ahora
+        res.json(response.data);
     } catch (e) {
-        res.status(500).json({ 
-            error: "Error en el barrido total",
-            detalle: e.response?.data || e.message 
-        });
+        res.status(500).json({ error: e.message, detalle: e.response?.data });
     }
 });
 
