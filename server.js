@@ -17,32 +17,36 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Usamos un filtro más amplio, tal como hacés en el otro proyecto
-    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("perfilado")');
+    // Eliminamos el filtro de nombre para ver TODO lo que hay disponible
+    const entitySelector = encodeURIComponent('type(SERVICE)');
     const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=100`;
     
     try {
+        console.log("Consultando todos los servicios en:", url);
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        if (response.data.entities.length === 0) {
+        if (!response.data.entities || response.data.entities.length === 0) {
             return res.json({ 
-                message: "No se encontraron servicios con 'perfilado'. Probando barrido total...",
-                sugerencia: "Asegurate de que el nombre sea exacto o intentá con 'customer'"
+                message: "Dynatrace no reporta ningún servicio con este Token.",
+                permisos: "Verificá que el Token tenga 'entities.read' v2" 
             });
         }
         
-        // Te devuelve la lista de servicios encontrados para que elijas el ID correcto
+        // Muestra la lista completa para que busquemos la API de perfilado manualmente
         res.json({
-            count: response.data.totalCount,
-            servicios_encontrados: response.data.entities.map(e => ({
+            total_en_dynatrace: response.data.totalCount,
+            lista_servicios: response.data.entities.map(e => ({
                 id: e.entityId,
                 nombre: e.displayName
             }))
         });
     } catch (e) {
-        res.status(500).json({ error: e.message, detalle: e.response?.data });
+        res.status(500).json({ 
+            error: "Error en el barrido total",
+            detalle: e.response?.data || e.message 
+        });
     }
 });
 
