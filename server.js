@@ -15,23 +15,24 @@ const pgPool = new Pool({
 });
 
 // --- ENDPOINT DE DESCUBRIMIENTO ---
+// --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Usamos el endpoint de 'entities' que es el que te funcionó antes
-    // pero filtrando por el nombre de tu API de perfilado
-    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=type(SERVICE),name.count("perfilado-customer-account-api")`;
+    // Corregimos el selector: usamos entityName con contains para evitar errores de sintaxis
+    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("perfilado-customer-account-api")');
+    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
         
-        // Esto nos confirmará si Dynatrace ve el servicio y cuál es su ID exacto
+        // Si encuentra la entidad, nos dará el entityId (ej: SERVICE-12345)
         res.json(response.data);
     } catch (e) {
         console.error(`[❌] Error: ${e.message}`);
         res.status(e.response?.status || 500).json({ 
-            error: e.message, 
-            detalle: e.response?.data 
+            error: "Error en la consulta a Dynatrace",
+            detalle: e.response?.data || e.message 
         });
     }
 });
