@@ -17,8 +17,8 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Buscamos SERVICE_METHOD, que es donde Dynatrace guarda los endpoints individuales
-    const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("perfilado")');
+    // Buscamos por la URL real que vimos en Kibana
+    const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("customer-account-profiling")');
     const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=50`;
     
     try {
@@ -28,16 +28,16 @@ app.get('/api/discover-fields', async (req, res) => {
 
         if (!response.data.entities || response.data.entities.length === 0) {
             return res.json({ 
-                message: "No se encontraron métodos con 'perfilado'. Intentando con 'customer'...",
-                ayuda: "Cambiá el filtro en el código a .contains('customer') si este falla."
+                message: "No se encontró el método con 'customer-account-profiling'.",
+                sugerencia: "Intentemos buscar por la aplicación 'Power CRM2'"
             });
         }
         
         res.json({
-            total: response.data.totalCount,
-            apis_encontradas: response.data.entities.map(e => ({
+            mensaje: "¡API Encontrada!",
+            apis: response.data.entities.map(e => ({
                 id: e.entityId,
-                nombre_api: e.displayName
+                nombre: e.displayName
             }))
         });
     } catch (e) {
