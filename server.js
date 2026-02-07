@@ -9,63 +9,63 @@ app.use(cors());
 app.use(express.json());
 
 // 1. CONFIGURACIÓN DE BASE DE DATOS (Neon)
+// Render usa la variable DATABASE_URL para conectarse a use-monitor-db
 const pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
 // 2. CONFIGURACIÓN DE DYNATRACE
-// Usamos el dominio que me pasaste antes
+// Definimos el dominio fijo para evitar errores de 404 por variables faltantes
 const DT_DOMAIN = 'ftr18515.live.dynatrace.com';
-const DT_URL = `https://${DT_DOMAIN}/api/v2/v1/query/execute`;
 const DT_TOKEN = process.env.DT_TOKEN;
+const DT_QUERY_URL = `https://${DT_DOMAIN}/api/v2/v1/query/execute`;
+
+// --- ENDPOINT DE BIENVENIDA (Para evitar el "Cannot GET /") ---
+app.get('/', (req, res) => {
+    res.send('🚀 Monitor de Usuarios Activo. Usa /api/discover-fields para explorar o /api/sync-users para sincronizar.');
+});
 
 // --- ENDPOINT 1: DESCUBRIMIENTO ---
-// Usalo para ver qué atributos captura Dynatrace de tu API
+// Ejecuta esto para ver qué campos (attributes) está capturando Dynatrace
 app.get('/api/discover-fields', async (req, res) => {
     try {
         const dqlQuery = {
-            query: `fetch spans | filter contains(http.url, "perfilado-customer-account-api") | limit 1`
+            query: `fetch spans
+                    | filter contains(http.url, "perfilado-customer-account-api")
+                    | limit 1`
         };
 
-        const response = await axios.post(DT_URL, dqlQuery, {
+        const response = await axios.post(DT_QUERY_URL, dqlQuery, {
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` }
         });
 
         if (!response.data.results || response.data.results.length === 0) {
             return res.status(404).json({ 
-                error: "No hay datos", 
-                mensaje: "Dynatrace no encontró actividad para esa API en las últimas 2 horas." 
+                error: "Sin datos", 
+                mensaje: "No se encontró actividad reciente para 'perfilado-customer-account-api'." 
             });
         }
 
         res.json(response.data.results[0]);
     } catch (error) {
-        // Esto nos dirá si es un problema de Token (401) o de URL (404)
         const status = error.response?.status || 500;
-        const detail = error.response?.data || error.message;
-        
-        console.error('--- DETALLE DEL ERROR ---');
-        console.error('Status:', status);
-        console.error('Data:', detail);
-
         res.status(status).json({ 
             error: "Error en la comunicación con Dynatrace",
-            status: status,
-            detalle: detail
+            detalle: error.response?.data || error.message
         });
     }
 });
 
 // --- ENDPOINT 2: SINCRONIZACIÓN ---
-// Este es el que busca los datos y los mete en la tabla 'monitor_usuarios'
+// Busca trazas y las guarda en la tabla 'monitor_usuarios' en Neon
 app.get('/api/sync-users', async (req, res) => {
     let client;
     try {
         client = await pgPool.connect();
         
-        // NOTA: Una vez que sepas el nombre del atributo del usuario, 
-        // cambialo abajo donde dice: attributes["http.user_id"]
+        // Query para traer trazas que tengan un usuario identificado
+        // NOTA: Ajustaremos "http.user_id" una vez que lo confirmes con discover-fields
         const dqlQuery = {
             query: `fetch spans
                     | filter contains(http.url, "perfilado-customer-account-api")
@@ -74,13 +74,13 @@ app.get('/api/sync-users', async (req, res) => {
                              user = attributes["http.user_id"], 
                              status = http.status_code, 
                              duration,
-                             http.url
+                             url = http.url
                     | filter isNotNull(user)
                     | sort timestamp desc
                     | limit 100`
         };
 
-        const dtRes = await axios.post(DT_URL, dqlQuery, {
+        const dtRes = await axios.post(DT_QUERY_URL, dqlQuery, {
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` }
         });
 
@@ -88,7 +88,6 @@ app.get('/api/sync-users', async (req, res) => {
         let nuevosRegistros = 0;
 
         for (const ev of eventos) {
-            // Insertamos evitando duplicados gracias al trace_id
             const result = await client.query(`
                 INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms, endpoint)
                 VALUES ($1, $2, $3, $4, $5, $6)
@@ -98,8 +97,8 @@ app.get('/api/sync-users', async (req, res) => {
                 ev.timestamp, 
                 ev.user, 
                 ev.status, 
-                (ev.duration / 1000000).toFixed(2), // Convertimos a milisegundos
-                ev['http.url']
+                (ev.duration / 1000000).toFixed(2), 
+                ev.url
             ]);
             
             if (result.rowCount > 0) nuevosRegistros++;
@@ -107,21 +106,19 @@ app.get('/api/sync-users', async (req, res) => {
 
         res.json({ 
             success: true, 
-            message: `Sincronización finalizada`, 
             procesados: eventos.length,
             nuevos_en_db: nuevosRegistros 
         });
 
     } catch (error) {
-        console.error('Error en sincronización:', error.message);
         res.status(500).json({ error: error.message });
     } finally {
         if (client) client.release();
     }
 });
 
-// Inicio del servidor
+// 3. INICIO DEL SERVIDOR
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-    console.log(`🚀 Monitor de Usuarios corriendo en puerto ${PORT}`);
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
