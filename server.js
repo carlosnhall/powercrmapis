@@ -21,46 +21,20 @@ const DT_BASE_URL = `https://${DT_DOMAIN}/api/v2`;
 
 // --- ENDPOINT DE BIENVENIDA ---
 app.get('/', (req, res) => {
-    res.send('🚀 Power CRM Monitor Activo (2026). Usa /api/discover-fields o /api/sync-users.');
+    res.send('🚀 Power CRM Monitor Activo (2026). Usa /api/sync-users para procesar datos.');
 });
 
-// --- ENDPOINT 1: DESCUBRIMIENTO ---
-// Busca la entidad exacta usando el nombre técnico visto en Kibana
-app.get('/api/discover-fields', async (req, res) => {
-    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("customer-account-profiling")');
-    const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}`;
-    
-    try {
-        const response = await axios.get(url, { 
-            headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
-        });
-
-        if (response.data.entities.length === 0) {
-            return res.json({ 
-                message: "No se encontró el servicio con 'customer-account-profiling'.",
-                sugerencia: "Verificá si el nombre en Dynatrace coincide con el uri_path de Kibana." 
-            });
-        }
-
-        res.json({
-            mensaje: "¡Servicios encontrados!",
-            datos: response.data.entities
-        });
-    } catch (e) {
-        res.status(500).json({ error: e.message, detalle: e.response?.data });
-    }
-});
-
-// --- ENDPOINT 2: SINCRONIZACIÓN (Proyecto Power CRM Monitor) ---
+// --- ENDPOINT DE SINCRONIZACIÓN (Lógica basada en Kibana) ---
 app.get('/api/sync-users', async (req, res) => {
     let client;
     try {
         client = await pgPool.connect();
         
-        // Buscamos las métricas de peticiones para capturar las URLs
-        // Como no tenemos 'Read traces', usamos 'metrics/query' con splitBy por URL
+        // Consultamos métricas desglosadas por el nombre del método/URL
         const metricSelector = 'builtin:service.keyRequest.count.total:splitBy("dt.entity.service.keyRequest")';
         const url = `${DT_BASE_URL}/metrics/query?metricSelector=${metricSelector}&from=now-1h`;
+        
+        console.log("📡 Consultando tráfico reciente a Dynatrace...");
         
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
@@ -70,25 +44,34 @@ app.get('/api/sync-users', async (req, res) => {
         let nuevos = 0;
 
         for (const item of dataPoints) {
-            const fullUrl = item.dimensionMap["dt.entity.service.keyRequest"] || "";
+            // Buscamos el nombre de la API en cualquier dimensión disponible que envíe Dyna
+            const dimensionValue = item.dimensionMap["dt.entity.service.keyRequest"] || 
+                                 item.dimensionMap["Service method"] || 
+                                 Object.values(item.dimensionMap)[0] || "";
             
-            // Lógica basada en tu log de Kibana: extraer el teléfono de la URI
-            // Path: .../phone-numbers/2616570318/subscription-status
-            const phoneMatch = fullUrl.match(/phone-numbers\/(\d+)/);
-            const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/Anonimo";
+            console.log(`🔍 Analizando ruta detectada: ${dimensionValue}`);
 
-            // Solo procesamos si la URL pertenece a tu API de perfilado
-            if (fullUrl.includes("customer-account-profiling") || fullUrl.includes("perfilado")) {
+            // Filtro basado en tu log de Kibana: customer-account-profiling
+            if (dimensionValue.toLowerCase().includes("customer-account") || 
+                dimensionValue.toLowerCase().includes("profiling")) {
+                
+                console.log("✅ ¡API de Perfilado detectada! Extrayendo datos...");
+
+                // Extraemos el número de teléfono de la URL (el usuario real en Power CRM)
+                const phoneMatch = dimensionValue.match(/phone-numbers\/(\d+)/);
+                const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/Anonimo";
+
+                // Insertamos en la tabla de Neon
                 const result = await client.query(`
                     INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (trace_id) DO NOTHING
                 `, [
-                    `TR-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`, // Generamos ID único temporal
+                    `TR-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
                     new Date().toISOString(),
                     usuarioId,
-                    200, // Status code asumido (puedes ajustarlo si obtienes la métrica de error)
-                    fullUrl
+                    200,
+                    dimensionValue
                 ]);
                 
                 if (result.rowCount > 0) nuevos++;
@@ -97,19 +80,35 @@ app.get('/api/sync-users', async (req, res) => {
 
         res.json({ 
             success: true, 
-            mensaje: "Sincronización completada basada en URLs de Kibana",
-            nuevos_registros: nuevos 
+            procesados: dataPoints.length,
+            nuevos_en_db: nuevos,
+            timestamp: new Date().toISOString()
         });
 
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: e.message });
+        console.error("❌ ERROR EN SINCRONIZACIÓN:", e.message);
+        res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
     }
 });
 
-// Inicio del servidor
+// --- ENDPOINT DE DESCUBRIMIENTO (Para ver qué servicios hay) ---
+app.get('/api/discover-fields', async (req, res) => {
+    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("customer")');
+    const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}`;
+    
+    try {
+        const response = await axios.get(url, { 
+            headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
+        });
+        res.json(response.data);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. INICIO DEL SERVIDOR
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor Power CRM Monitor corriendo en puerto ${PORT}`);
