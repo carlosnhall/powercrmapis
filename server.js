@@ -17,17 +17,29 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // En lugar de buscar ENTITIES, buscamos directamente en las métricas de REQUESTS
-    // para ver qué URLs están pasando por el sistema ahora mismo.
-    const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=builtin:service.keyRequest.count.total:splitBy("dt.entity.service")&pageSize=20&from=now-1h`;
+    // Buscamos PROCESS_GROUP_INSTANCE que es donde corren las aplicaciones reales
+    const entitySelector = encodeURIComponent('type(PROCESS_GROUP_INSTANCE),displayName.contains("customer")');
+    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=50`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        // Esto nos va a dar los IDs de los servicios que REALMENTE tienen tráfico ahora
-        res.json(response.data);
+        if (response.data.entities.length === 0) {
+            return res.json({ 
+                message: "No se encontraron procesos con 'customer'. Intentando con 'profiling'...",
+                ayuda: "Asegurate de que el nombre técnico sea similar."
+            });
+        }
+        
+        res.json({
+            count: response.data.totalCount,
+            procesos: response.data.entities.map(e => ({
+                id: e.entityId,
+                nombre: e.displayName
+            }))
+        });
     } catch (e) {
         res.status(500).json({ error: e.message, detalle: e.response?.data });
     }
