@@ -17,8 +17,9 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Buscamos PROCESS_GROUP_INSTANCE que es donde corren las aplicaciones reales
-    const entitySelector = encodeURIComponent('type(PROCESS_GROUP_INSTANCE),displayName.contains("customer")');
+    // Probamos con SERVICE y PROCESS_GROUP_INSTANCE en una sola consulta o rotando el filtro
+    // Usamos entityName que es el predicado correcto para v2
+    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("customer")');
     const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=50`;
     
     try {
@@ -26,22 +27,25 @@ app.get('/api/discover-fields', async (req, res) => {
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        if (response.data.entities.length === 0) {
+        if (!response.data.entities || response.data.entities.length === 0) {
             return res.json({ 
-                message: "No se encontraron procesos con 'customer'. Intentando con 'profiling'...",
-                ayuda: "Asegurate de que el nombre técnico sea similar."
+                message: "No se encontró nada con 'customer'. Intentá cambiando el filtro a 'perfilado' o 'account' en el código.",
+                totalCount: response.data.totalCount
             });
         }
         
         res.json({
             count: response.data.totalCount,
-            procesos: response.data.entities.map(e => ({
+            resultados: response.data.entities.map(e => ({
                 id: e.entityId,
                 nombre: e.displayName
             }))
         });
     } catch (e) {
-        res.status(500).json({ error: e.message, detalle: e.response?.data });
+        res.status(e.response?.status || 500).json({ 
+            error: "Error de sintaxis o conexión",
+            detalle: e.response?.data || e.message 
+        });
     }
 });
 
