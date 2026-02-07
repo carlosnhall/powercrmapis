@@ -28,76 +28,56 @@ app.get('/api/sync-users', async (req, res) => {
     let client;
     try {
         client = await pgPool.connect();
-        console.log("📡 Iniciando consulta de métricas en Dynatrace...");
-
-        // Intentamos primero con la métrica de Key Requests (más precisa si existen)
-        let metricSelector = 'builtin:service.keyRequest.count.total:splitBy("dt.entity.service.keyRequest")';
-        let url = `${DT_BASE_URL}/metrics/query?metricSelector=${metricSelector}&from=now-2h`;
         
-        let response = await axios.get(url, { 
+        // 1. Buscamos directamente las ENTIDADES (SERVICE_METHOD) 
+        // Esto lista todos los endpoints que Dynatrace conoce en el DataPower
+        const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("customer-account-profiling")');
+        const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}&pageSize=100`;
+        
+        console.log("📡 Buscando entidades de tipo API en el inventario...");
+        
+        const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        let dataPoints = response.data.result[0]?.data || [];
-
-        // FALLBACK: Si no hay Key Requests, buscamos en el conteo de peticiones generales
-        if (dataPoints.length === 0) {
-            console.log("⚠️ No se hallaron Key Requests. Buscando en tráfico general del Gateway...");
-            metricSelector = 'builtin:service.requestCount.total:splitBy("dt.entity.service.keyRequest")';
-            url = `${DT_BASE_URL}/metrics/query?metricSelector=${metricSelector}&from=now-2h`;
-            
-            response = await axios.get(url, { 
-                headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
-            });
-            dataPoints = response.data.result[0]?.data || [];
-        }
-
-        console.log(`📊 Total de rutas procesadas desde Dynatrace: ${dataPoints.length}`);
+        const apisEncontradas = response.data.entities || [];
+        console.log(`📊 APIs detectadas en el inventario: ${apisEncontradas.length}`);
 
         let nuevos = 0;
-        for (const item of dataPoints) {
-            // Extraemos el nombre de la ruta/URL de la dimensión
-            const requestPath = item.dimensionMap["dt.entity.service.keyRequest"] || "";
+        for (const api of apisEncontradas) {
+            const requestPath = api.displayName; // En SERVICE_METHOD, el displayName es la URL o el nombre del método
 
-            // Filtro específico para tu API de Perfilado según lo visto en Kibana/Dyna
-            if (requestPath.toLowerCase().includes("customer-account-profiling")) {
-                
-                console.log(`✅ Coincidencia: ${requestPath}`);
+            console.log(`✅ Procesando: ${requestPath}`);
 
-                // Extraemos el teléfono (usuario) de la URL
-                const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
-                const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/Anonimo";
+            // Extraemos el teléfono de la URL
+            const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
+            const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/Anonimo";
 
-                // Insertamos en Neon (use-monitor-db)
-                const result = await client.query(`
-                    INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (trace_id) DO NOTHING
-                `, [
-                    `DP-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-                    new Date().toISOString(),
-                    usuarioId,
-                    200,
-                    requestPath
-                ]);
-                
-                if (result.rowCount > 0) nuevos++;
-            }
+            // Insertamos en Neon
+            const result = await client.query(`
+                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (trace_id) DO NOTHING
+            `, [
+                `INV-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                new Date().toISOString(),
+                usuarioId,
+                200,
+                requestPath
+            ]);
+            
+            if (result.rowCount > 0) nuevos++;
         }
 
         res.json({ 
             success: true, 
-            procesados: dataPoints.length, 
+            procesados: apisEncontradas.length, 
             nuevos_en_db: nuevos,
-            rango: "últimas 2 horas"
+            metodo: "Inventario de Entidades"
         });
 
     } catch (e) {
-        console.error("❌ Error en el proceso:", e.message);
-        res.status(500).json({ 
-            error: e.message, 
-            detalle: e.response?.data || "Error de conexión" 
-        });
+        res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
     }
