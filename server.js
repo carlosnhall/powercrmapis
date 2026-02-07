@@ -26,61 +26,53 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         
-        // CAMBIO CLAVE: Usamos requestCount (general) en lugar de keyRequest (específica)
-        // Agregamos splitBy("dt.entity.service") para identificar el origen
-        const metricSelector = 'builtin:service.requestCount.total:splitBy("dt.entity.service")';
-        const url = `${DT_BASE_URL}/metrics/query?metricSelector=${metricSelector}&from=now-2h`;
-        
-        console.log("📡 Consultando tráfico global a Dynatrace...");
+        // Consultamos las métricas de las peticiones que pasan por el DataPower
+        // Usamos la métrica de recuento desglosada por el nombre del método (URL completa)
+        const metricSelector = 'builtin:service.requestCount.total:splitBy("dt.entity.service.keyRequest")';
+        const url = `https://${DT_DOMAIN}/api/v2/metrics/query?metricSelector=${metricSelector}&from=now-1h`;
         
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        // Si la respuesta está vacía, intentamos con una métrica de procesos
         const dataPoints = response.data.result[0]?.data || [];
-        
-        if (dataPoints.length === 0) {
-            return res.json({ 
-                success: true, 
-                mensaje: "Dynatrace no reportó métricas en las últimas 2 horas. ¿Hay tráfico en la API?",
-                procesados: 0 
-            });
-        }
-
         let nuevos = 0;
-        for (const item of dataPoints) {
-            // Buscamos cualquier rastro de la entidad
-            const entityId = item.dimensionMap["dt.entity.service"] || "unknown";
-            
-            // Log para debuggear en Render
-            console.log(`🔍 Detectado tráfico en servicio: ${entityId}`);
 
-            // Aquí es donde mañana vincularemos el SERVICE-ID con los logs de Kibana
-            // Por ahora, intentamos guardar el rastro si es un servicio activo
-            const result = await client.query(`
-                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (trace_id) DO NOTHING
-            `, [
-                `TR-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-                new Date().toISOString(),
-                "Pendiente-Identificar", 
-                200,
-                entityId
-            ]);
-            
-            if (result.rowCount > 0) nuevos++;
+        for (const item of dataPoints) {
+            const requestPath = item.dimensionMap["dt.entity.service.keyRequest"] || "";
+
+            // Filtramos solo la API que nos interesa (la que encontraste hoy)
+            if (requestPath.includes("customer-account-profiling")) {
+                
+                // Extraemos el teléfono de la URL: .../phone-numbers/2616570318/...
+                const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
+                const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema";
+
+                // Insertamos en tu base de datos de Neon
+                const result = await client.query(`
+                    INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (trace_id) DO NOTHING
+                `, [
+                    `DP-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                    new Date().toISOString(),
+                    usuarioId,
+                    200, // En métricas generales asumimos 200, o podemos buscar la métrica de errores
+                    requestPath
+                ]);
+                
+                if (result.rowCount > 0) nuevos++;
+            }
         }
 
         res.json({ 
             success: true, 
-            procesados: dataPoints.length,
+            procesados: dataPoints.length, 
             nuevos_en_db: nuevos 
         });
 
     } catch (e) {
-        res.status(500).json({ error: e.message, detalle: e.response?.data });
+        res.status(500).json({ error: e.message });
     } finally {
         if (client) client.release();
     }
