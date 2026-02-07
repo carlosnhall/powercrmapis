@@ -29,54 +29,53 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         
-        // 1. Buscamos directamente las ENTIDADES (SERVICE_METHOD) 
-        // Esto lista todos los endpoints que Dynatrace conoce en el DataPower
-        const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("customer-account-profiling")');
-        const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}&pageSize=100`;
+        // 1. Buscamos las trazas (eventos individuales) de la última hora
+        // Filtramos por la entidad de la API que ya sabemos que existe
+        const traceUrl = `${DT_BASE_URL}/traces?pageSize=50&from=now-1h`;
         
-        console.log("📡 Buscando entidades de tipo API en el inventario...");
+        console.log("📡 Pidiendo trazas recientes a Dynatrace...");
         
-        const response = await axios.get(url, { 
+        const response = await axios.get(traceUrl, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const apisEncontradas = response.data.entities || [];
-        console.log(`📊 APIs detectadas en el inventario: ${apisEncontradas.length}`);
+        const trazas = response.data.traces || [];
+        console.log(`📊 Trazas encontradas: ${trazas.length}`);
 
         let nuevos = 0;
-        for (const api of apisEncontradas) {
-            const requestPath = api.displayName; // En SERVICE_METHOD, el displayName es la URL o el nombre del método
+        for (const trace of trazas) {
+            // Solo nos interesan las que tengan que ver con perfilado
+            // Dynatrace nos da el 'name' de la traza, que suele ser el path
+            if (trace.name.toLowerCase().includes("customer-account-profiling")) {
+                
+                // Extraemos el teléfono de la traza (trace.name)
+                const phoneMatch = trace.name.match(/phone-numbers\/(\d+)/);
+                const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/HealthCheck";
 
-            console.log(`✅ Procesando: ${requestPath}`);
-
-            // Extraemos el teléfono de la URL
-            const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
-            const usuarioId = phoneMatch ? phoneMatch[1] : "Sistema/Anonimo";
-
-            // Insertamos en Neon
-            const result = await client.query(`
-                INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (trace_id) DO NOTHING
-            `, [
-                `INV-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-                new Date().toISOString(),
-                usuarioId,
-                200,
-                requestPath
-            ]);
-            
-            if (result.rowCount > 0) nuevos++;
+                const result = await client.query(`
+                    INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (trace_id) DO NOTHING
+                `, [
+                    trace.traceId, // Usamos el ID real de la traza de Dynatrace
+                    new Date(trace.startTime / 1000).toISOString(),
+                    usuarioId,
+                    trace.statusCode || 200,
+                    trace.name
+                ]);
+                
+                if (result.rowCount > 0) nuevos++;
+            }
         }
 
         res.json({ 
             success: true, 
-            procesados: apisEncontradas.length, 
-            nuevos_en_db: nuevos,
-            metodo: "Inventario de Entidades"
+            trazas_procesadas: trazas.length, 
+            nuevos_eventos_en_db: nuevos 
         });
 
     } catch (e) {
+        console.error("Error capturando trazas:", e.message);
         res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
