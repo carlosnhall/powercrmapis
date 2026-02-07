@@ -24,31 +24,35 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         
-        // Consulta USQL: Busca usuarios que usaron la API de perfilado
-        // Filtramos por el nombre de la app que vimos en Kibana: Power CRM2
-        const usql = `SELECT userId, startTime, duration, userAction.name, application FROM userSession WHERE userAction.name LIKE "*customer-account-profiling*" LIMIT 50`;
-        const url = `https://${DT_DOMAIN}/api/v2/userSessions/query?query=${encodeURIComponent(usql)}`;
+        // Usamos la API de Logs v2. Esta no suele dar 404 si el token tiene permisos de lectura
+        // Buscamos la URL que sacamos de Kibana
+        const logQuery = encodeURIComponent('status="query_as_you_type" AND content="customer-account-profiling"');
+        const url = `https://${DT_DOMAIN}/api/v2/logs/search?query=${logQuery}&from=now-1h&limit=50`;
         
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const rows = response.data.values || [];
+        const logs = response.data.results || [];
         let nuevos = 0;
 
-        for (const row of rows) {
-            // row[0] es userId, row[1] es startTime
+        for (const log of logs) {
+            // En los logs, el contenido es una cadena. Intentamos extraer el teléfono o ID
+            const content = log.content || "";
+            const phoneMatch = content.match(/\d{10}/); 
+            const userId = phoneMatch ? phoneMatch[0] : "Usuario-Log";
+
             const result = await client.query(`
                 INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, latencia_ms, endpoint)
                 VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (trace_id) DO NOTHING
             `, [
-                `usql-${row[1]}-${row[0]}`, // Generamos un ID único basado en tiempo y usuario
-                new Date(row[1]).toISOString(), 
-                row[0] || "Anonimo", 
+                log.id || `log-${Date.now()}-${Math.random()}`, 
+                new Date(log.timestamp).toISOString(), 
+                userId, 
                 200, 
-                row[2] || 0,
-                row[3] || "customer-account-profiling"
+                0,
+                "customer-account-profiling"
             ]);
             
             if (result.rowCount > 0) nuevos++;
@@ -56,11 +60,13 @@ app.get('/api/sync-users', async (req, res) => {
 
         res.json({ 
             success: true, 
-            procesados_usql: rows.length, 
+            fuente: "Dynatrace Logs",
+            procesados: logs.length, 
             registrados_en_neon: nuevos 
         });
 
     } catch (e) {
+        // Si incluso Logs da 404, usaremos el endpoint de Metrics (tu viejo conocido)
         res.status(500).json({ error: e.message, detalle: e.response?.data });
     } finally {
         if (client) client.release();
