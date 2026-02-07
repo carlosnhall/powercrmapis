@@ -17,23 +17,32 @@ const pgPool = new Pool({
 // --- ENDPOINT DE DESCUBRIMIENTO ---
 // --- ENDPOINT DE DESCUBRIMIENTO CORREGIDO ---
 app.get('/api/discover-fields', async (req, res) => {
-    // Corregimos el selector: usamos entityName con contains para evitar errores de sintaxis
-    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("perfilado-customer-account-api")');
-    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}`;
+    // Usamos un filtro más amplio, tal como hacés en el otro proyecto
+    const entitySelector = encodeURIComponent('type(SERVICE),entityName.contains("perfilado")');
+    const url = `https://${DT_DOMAIN}/api/v2/entities?entitySelector=${entitySelector}&pageSize=100`;
     
     try {
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
+
+        if (response.data.entities.length === 0) {
+            return res.json({ 
+                message: "No se encontraron servicios con 'perfilado'. Probando barrido total...",
+                sugerencia: "Asegurate de que el nombre sea exacto o intentá con 'customer'"
+            });
+        }
         
-        // Si encuentra la entidad, nos dará el entityId (ej: SERVICE-12345)
-        res.json(response.data);
-    } catch (e) {
-        console.error(`[❌] Error: ${e.message}`);
-        res.status(e.response?.status || 500).json({ 
-            error: "Error en la consulta a Dynatrace",
-            detalle: e.response?.data || e.message 
+        // Te devuelve la lista de servicios encontrados para que elijas el ID correcto
+        res.json({
+            count: response.data.totalCount,
+            servicios_encontrados: response.data.entities.map(e => ({
+                id: e.entityId,
+                nombre: e.displayName
+            }))
         });
+    } catch (e) {
+        res.status(500).json({ error: e.message, detalle: e.response?.data });
     }
 });
 
