@@ -25,23 +25,35 @@ const DT_TOKEN = process.env.DT_TOKEN;
 app.get('/api/discover-fields', async (req, res) => {
     try {
         const dqlQuery = {
-            query: `fetch spans
-                    | filter contains(http.url, "perfilado-customer-account-api")
-                    | limit 1`
+            query: `fetch spans | filter contains(http.url, "perfilado-customer-account-api") | limit 1`
         };
 
         const response = await axios.post(DT_URL, dqlQuery, {
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` }
         });
 
-        if (response.data.results.length === 0) {
-            return res.json({ message: "No se encontraron trazas. Asegurate de que la API tenga tráfico." });
+        if (!response.data.results || response.data.results.length === 0) {
+            return res.status(404).json({ 
+                error: "No hay datos", 
+                mensaje: "Dynatrace no encontró actividad para esa API en las últimas 2 horas." 
+            });
         }
 
         res.json(response.data.results[0]);
     } catch (error) {
-        console.error('Error en descubrimiento:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Error al explorar atributos' });
+        // Esto nos dirá si es un problema de Token (401) o de URL (404)
+        const status = error.response?.status || 500;
+        const detail = error.response?.data || error.message;
+        
+        console.error('--- DETALLE DEL ERROR ---');
+        console.error('Status:', status);
+        console.error('Data:', detail);
+
+        res.status(status).json({ 
+            error: "Error en la comunicación con Dynatrace",
+            status: status,
+            detalle: detail
+        });
     }
 });
 
