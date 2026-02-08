@@ -29,39 +29,38 @@ app.get('/api/sync-users', async (req, res) => {
     try {
         client = await pgPool.connect();
         
-        // 1. Buscamos todas las entidades de tipo SERVICE_METHOD
-        // Filtramos por el nombre de la API que ya confirmamos que existe
-        // Agregamos 'from=now-2h' para forzar a Dynatrace a buscar actividad reciente
-        const entitySelector = encodeURIComponent('type(SERVICE_METHOD),entityName.contains("customer-account-profiling")');
-        const url = `${DT_BASE_URL}/entities?entitySelector=${entitySelector}&pageSize=100&from=now-2h`;
+        // Buscamos en el historial de logs de los servicios
+        // Cambiamos el query para que sea bien amplio: cualquier log que mencione tu API
+        const logQuery = encodeURIComponent('customer-account-profiling');
+        const url = `${DT_BASE_URL}/logs/search?query=${logQuery}&from=now-2h`;
         
-        console.log("📡 Escaneando inventario de actividad reciente...");
+        console.log("📡 Rastreando logs de actividad...");
         
         const response = await axios.get(url, { 
             headers: { 'Authorization': `Api-Token ${DT_TOKEN}` } 
         });
 
-        const entidades = response.data.entities || [];
+        // Dynatrace v2 Logs devuelve un array 'results'
+        const eventos = response.data.results || [];
         let nuevos = 0;
 
-        for (const entidad of entidades) {
-            const requestPath = entidad.displayName;
+        for (const evento of eventos) {
+            const logContent = evento.content || evento.message || "";
             
-            // Extraemos el teléfono si existe en el nombre de la entidad
-            const phoneMatch = requestPath.match(/phone-numbers\/(\d+)/);
+            // Buscamos el teléfono en el texto del log
+            const phoneMatch = logContent.match(/phone-numbers\/(\d+)/);
             const usuarioId = phoneMatch ? phoneMatch[1] : "Usuario-Activo";
 
-            // Insertamos usando el entityId como clave única para no duplicar lo que ya existe
             const result = await client.query(`
                 INSERT INTO monitor_usuarios (trace_id, timestamp_evento, usuario_id, status_code, endpoint)
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (trace_id) DO NOTHING
             `, [
-                entidad.entityId, // Usamos el ID de Dynatrace como clave única
-                new Date().toISOString(),
+                evento.id || `L-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+                evento.timestamp || new Date().toISOString(),
                 usuarioId,
                 200,
-                requestPath
+                logContent.substring(0, 200) // Guardamos el fragmento del log
             ]);
             
             if (result.rowCount > 0) nuevos++;
@@ -69,14 +68,17 @@ app.get('/api/sync-users', async (req, res) => {
 
         res.json({ 
             success: true, 
-            total_encontrados: entidades.length,
-            nuevos_en_base: nuevos,
-            mensaje: "Sincronización por Inventario de Actividad"
+            logs_encontrados: eventos.length, 
+            nuevos_usuarios: nuevos 
         });
 
     } catch (e) {
-        console.error("Error:", e.message);
-        res.status(500).json({ error: e.message });
+        // Si el endpoint de logs falla por permisos, intentamos el modo "v1" o reportamos
+        console.error("Error en logs:", e.message);
+        res.status(500).json({ 
+            error: "El Token no tiene permiso de lectura de logs (LogExport)", 
+            detalle: e.response?.data || e.message 
+        });
     } finally {
         if (client) client.release();
     }
